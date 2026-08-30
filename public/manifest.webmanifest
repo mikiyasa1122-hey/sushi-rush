@@ -1,0 +1,15 @@
+{
+  "name": "SUSHI RUSH",
+  "short_name": "SUSHI RUSH",
+  "description": "60秒で注文どおりの寿司を握るオフライン対応ゲーム",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#160904",
+  "theme_color": "#c42818",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
