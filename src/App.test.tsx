@@ -1,8 +1,10 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
 
 describe('App title navigation', () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it('shows the title and opens the how-to-play screen', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -39,5 +41,22 @@ describe('App title navigation', () => {
     expect(screen.getByRole('heading', { name: '設定' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: '「Hey Omachi!」音声' })).toBeChecked();
     expect(screen.getByRole('button', { name: '音をテスト' })).toBeInTheDocument();
+  });
+
+  it('serves a one-piece order from a primary touch pointer', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'ゲームスタート' }));
+
+    fireEvent.pointerUp(screen.getByRole('button', { name: 'まぐろを握る' }), {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+    });
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Hey Omachi!');
+    expect(screen.getByText('700')).toBeInTheDocument();
   });
 });

@@ -6,12 +6,15 @@ import { LeaderboardRepository, type LeaderboardEntry } from './platform/leaderb
 import { AudioController } from './platform/audio';
 import { safeShare, safeVibrate } from './platform/capabilities';
 import { SushiArt } from './components/SushiArt';
+import { PressButton } from './components/PressButton';
+import { createLocalApi, LocalGameApi } from './api/local-api';
 
 type Screen = 'title' | 'howTo' | 'game' | 'ranking' | 'settings';
 const repository = new LeaderboardRepository();
 const audio = new AudioController();
+const localApi = new LocalGameApi(createLocalApi({ leaderboard: repository }));
 
-const BackButton = ({ onBack }: { onBack: () => void }) => <button className="secondary" type="button" onClick={onBack}>もどる</button>;
+const BackButton = ({ onBack }: { onBack: () => void }) => <PressButton className="secondary" onPress={onBack}>もどる</PressButton>;
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('title');
@@ -22,40 +25,61 @@ export default function App() {
   const [effects, setEffects] = useState(true);
   const [vibration, setVibration] = useState(true);
   const [celebration, setCelebration] = useState(false);
+  const [starting, setStarting] = useState(false);
   const game = useGame();
 
-  useEffect(() => { if (screen === 'ranking') void repository.list().then(setEntries); }, [screen]);
+  useEffect(() => {
+    let active = true;
+    void localApi.loadSettings().then((settings) => {
+      if (!active) return;
+      setVoice(settings.voice); setEffects(settings.effects); setVibration(settings.vibration);
+      audio.setVoiceEnabled(settings.voice); audio.setEffectsEnabled(settings.effects);
+    });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => { if (screen === 'ranking') void localApi.listRanking().then(setEntries); }, [screen]);
   useEffect(() => {
     if (game.snapshot.lastEvent !== 'served') return;
-    setCelebration(true); audio.setVoiceEnabled(voice); audio.playVoice();
+    setCelebration(true);
     if (vibration) safeVibrate([20, 30, 40]);
     const timer = window.setTimeout(() => setCelebration(false), 700);
     return () => window.clearTimeout(timer);
-  }, [game.snapshot.served, game.snapshot.lastEvent, voice, vibration]);
+  }, [game.snapshot.served, game.snapshot.lastEvent, vibration]);
 
-  const start = () => { setSaved(false); audio.unlock(); audio.playEffect('start'); game.start(); setScreen('game'); };
+  const start = () => {
+    if (starting) return;
+    setStarting(true); setSaved(false);
+    void audio.playEffectAfterUnlock('start').then(() => {
+      game.start(); setScreen('game'); setStarting(false);
+    });
+  };
   const back = () => setScreen('title');
-  const save = async () => { await repository.save({ name, score: game.snapshot.score, playedAt: Date.now() }); setEntries(await repository.list()); setSaved(true); };
+  const save = async () => { await localApi.saveRanking({ name, score: game.snapshot.score, playedAt: Date.now() }); setEntries(await localApi.listRanking()); setSaved(true); };
+  const updateSettings = (next: { voice: boolean; effects: boolean; vibration: boolean }) => {
+    setVoice(next.voice); setEffects(next.effects); setVibration(next.vibration);
+    audio.setVoiceEnabled(next.voice); audio.setEffectsEnabled(next.effects);
+    void localApi.saveSettings(next);
+  };
 
   let content: React.ReactNode;
   if (screen === 'howTo') content = <HowTo onBack={back} />;
   else if (screen === 'ranking') content = <Ranking entries={entries} onBack={back} />;
-  else if (screen === 'settings') content = <Settings voice={voice} effects={effects} vibration={vibration} setVoice={setVoice} setEffects={setEffects} setVibration={setVibration} onBack={back} />;
+  else if (screen === 'settings') content = <Settings voice={voice} effects={effects} vibration={vibration} update={updateSettings} onBack={back} />;
   else if (screen === 'game' && game.snapshot.status === 'finished') content = <Result snapshot={game.snapshot} name={name} setName={setName} saved={saved} save={save} retry={start} title={back} />;
   else if (screen === 'game') content = <Game game={game} celebration={celebration} title={back} />;
-  else content = <Title start={start} navigate={setScreen} />;
+  else content = <Title start={start} starting={starting} navigate={setScreen} />;
 
   return <div className="viewport"><div className="landscape-note">縦向きにしてください</div><main className="cabinet">{content}</main></div>;
 }
 
-function Title({ start, navigate }: { start: () => void; navigate: (s: Screen) => void }) {
+function Title({ start, starting, navigate }: { start: () => void; starting: boolean; navigate: (s: Screen) => void }) {
   return <section className="title-screen">
     <div className="lanterns" aria-hidden="true">●　●　●　●　●</div>
     <h1 className="logo" aria-label="SUSHI RUSH"><span>SUSHI</span><strong>RUSH</strong><small>寿司ラッシュ！</small></h1>
     <img className="chef hero-chef" src={`${import.meta.env.BASE_URL}assets/chef.png`} alt="寿司を持って応援する寿司職人" />
     <div className="title-copy"><b>60秒、一本勝負。</b><span>注文どおりに握って、最高の一皿を！</span></div>
-    <button className="start-button" type="button" onClick={start}>ゲームスタート</button>
-    <div className="menu-grid"><button onClick={() => navigate('howTo')}>遊び方</button><button onClick={() => navigate('ranking')}>ランキング</button><button onClick={() => navigate('settings')}>設定</button></div>
+    <PressButton className="start-button" disabled={starting} onPress={start}>{starting ? '音声を準備中…' : 'ゲームスタート'}</PressButton>
+    <div className="menu-grid"><PressButton onPress={() => navigate('howTo')}>遊び方</PressButton><PressButton onPress={() => navigate('ranking')}>ランキング</PressButton><PressButton onPress={() => navigate('settings')}>設定</PressButton></div>
     <p className="catchphrase">＼ Hey Omachi! ／</p>
   </section>;
 }
@@ -68,25 +92,30 @@ function Ranking({ entries, onBack }: { entries: LeaderboardEntry[]; onBack: () 
   return <section className="panel-screen"><h1>ローカルランキング</h1>{entries.length ? <ol className="ranking-list">{entries.map((e, i) => <li key={`${e.playedAt}-${i}`}><b>{i + 1}</b><span>{e.name}</span><strong>{e.score.toLocaleString()}</strong></li>)}</ol> : <p className="empty">まだ記録がありません。<br />最初の職人になろう！</p>}<BackButton onBack={onBack} /></section>;
 }
 
-interface SettingsProps { voice: boolean; effects: boolean; vibration: boolean; setVoice: (v: boolean) => void; setEffects: (v: boolean) => void; setVibration: (v: boolean) => void; onBack: () => void }
+interface SettingsProps { voice: boolean; effects: boolean; vibration: boolean; update: (settings: { voice: boolean; effects: boolean; vibration: boolean }) => void; onBack: () => void }
 function Settings(p: SettingsProps) {
   return <section className="panel-screen"><h1>設定</h1><div className="settings">
-    <label><span>「Hey Omachi!」音声</span><input aria-label="「Hey Omachi!」音声" type="checkbox" checked={p.voice} onChange={(e) => { p.setVoice(e.target.checked); audio.setVoiceEnabled(e.target.checked); }} /></label>
-    <label><span>効果音</span><input type="checkbox" checked={p.effects} onChange={(e) => { p.setEffects(e.target.checked); audio.setEffectsEnabled(e.target.checked); }} /></label>
-    <label><span>振動</span><input type="checkbox" checked={p.vibration} onChange={(e) => p.setVibration(e.target.checked)} /></label>
-  </div><button className="sound-test" onClick={() => { audio.unlock(); audio.playEffect('correct'); audio.playVoice(); }}>音をテスト</button><BackButton onBack={p.onBack} /></section>;
+    <label><span>「Hey Omachi!」音声</span><input aria-label="「Hey Omachi!」音声" type="checkbox" checked={p.voice} onChange={(e) => p.update({ voice: e.target.checked, effects: p.effects, vibration: p.vibration })} /></label>
+    <label><span>効果音</span><input type="checkbox" checked={p.effects} onChange={(e) => p.update({ voice: p.voice, effects: e.target.checked, vibration: p.vibration })} /></label>
+    <label><span>振動</span><input type="checkbox" checked={p.vibration} onChange={(e) => p.update({ voice: p.voice, effects: p.effects, vibration: e.target.checked })} /></label>
+  </div><PressButton className="sound-test" onPress={() => { void audio.playEffectAfterUnlock('correct'); audio.playVoice(); }}>音をテスト</PressButton><BackButton onBack={p.onBack} /></section>;
 }
 
 function Game({ game, celebration, title }: { game: ReturnType<typeof useGame>; celebration: boolean; title: () => void }) {
   const s = game.snapshot;
-  if (s.status === 'paused') return <div className="pause-overlay"><h1>一時停止</h1><button className="start-button" onClick={game.resume}>続ける</button><button className="secondary" onClick={title}>タイトルへ</button></div>;
+  if (s.status === 'paused') return <div className="pause-overlay"><h1>一時停止</h1><PressButton className="start-button" onPress={game.resume}>続ける</PressButton><PressButton className="secondary" onPress={title}>タイトルへ</PressButton></div>;
+  const pressSushi = (id: SushiId) => {
+    const next = game.tap(id);
+    void audio.playEffectAfterUnlock(next.lastEvent === 'miss' ? 'wrong' : 'correct');
+    if (next.lastEvent === 'served') audio.playVoice();
+  };
   const elapsed = 60_000 - s.remainingMs;
   return <section className={`game-screen ${s.remainingMs <= 10_000 ? 'rush' : ''}`}>
-    <header className="hud"><div><span>SCORE</span><strong>{s.score.toLocaleString()}</strong></div><div><span>TIME</span><strong>{Math.ceil(s.remainingMs / 1000)}</strong></div><div><span>COMBO</span><strong>×{s.combo}</strong></div><button aria-label="一時停止" onClick={game.pause}>Ⅱ</button></header>
+    <header className="hud"><div><span>SCORE</span><strong>{s.score.toLocaleString()}</strong></div><div><span>TIME</span><strong>{Math.ceil(s.remainingMs / 1000)}</strong></div><div><span>COMBO</span><strong>×{s.combo}</strong></div><PressButton aria-label="一時停止" onPress={game.pause}>Ⅱ</PressButton></header>
     {s.remainingMs <= 10_000 && <div className="rush-banner">RUSH TIME!</div>}
     <div className="orders" aria-label="注文一覧">{s.orders.map((order, index) => <article className="order-card" key={order.id}><div className="order-head"><b>注文 {index + 1}</b><span>{Math.max(0, Math.ceil((order.expiresAt - elapsed) / 1000))}秒</span></div><div className="order-items">{order.items.map((id, i) => { const done = i < order.filled.length; const sushi = sushiById(id); return <div className={done ? 'mini-sushi done' : 'mini-sushi'} key={`${id}-${i}`}><SushiArt id={id} name={sushi.name} /><small>{sushi.name}</small>{done && <i>済</i>}</div>; })}</div></article>)}</div>
     {celebration && <div className="omachi" role="status">Hey Omachi!<small>GOOD! + SCORE</small></div>}
-    <div className="sushi-grid">{SUSHI.map((sushi) => <button aria-label={`${sushi.name}を握る`} style={{ '--sushi-color': sushi.color } as React.CSSProperties} key={sushi.id} onClick={() => { const next = game.tap(sushi.id as SushiId); audio.playEffect(next.lastEvent === 'miss' ? 'wrong' : 'correct'); }}><SushiArt id={sushi.id} name={sushi.name} /><b>{sushi.name}</b></button>)}</div>
+    <div className="sushi-grid">{SUSHI.map((sushi) => <PressButton aria-label={`${sushi.name}を握る`} style={{ '--sushi-color': sushi.color } as React.CSSProperties} key={sushi.id} onPress={() => pressSushi(sushi.id as SushiId)}><SushiArt id={sushi.id} name={sushi.name} /><b>{sushi.name}</b></PressButton>)}</div>
     <div className="chef-strip"><img src={`${import.meta.env.BASE_URL}assets/chef.png`} alt="寿司職人" /><p>{s.lastEvent === 'miss' ? 'ドンマイ！次だ！' : s.remainingMs <= 10_000 ? 'ラストスパート！' : 'いいぞ！その調子！'}</p></div>
   </section>;
 }
@@ -94,5 +123,5 @@ function Game({ game, celebration, title }: { game: ReturnType<typeof useGame>; 
 interface ResultProps { snapshot: GameSnapshot; name: string; setName: (v: string) => void; saved: boolean; save: () => void; retry: () => void; title: () => void }
 function Result(p: ResultProps) {
   const rank = p.snapshot.score >= 20000 ? 'S' : p.snapshot.score >= 12000 ? 'A' : p.snapshot.score >= 6000 ? 'B' : 'C';
-  return <section className="panel-screen result"><h1>おつかれさま！</h1><div className="rank">{rank}</div><p>スコア<strong>{p.snapshot.score.toLocaleString()}</strong></p><div className="result-stats"><span>最高コンボ <b>×{p.snapshot.maxCombo}</b></span><span>提供した注文 <b>{p.snapshot.served}</b></span></div>{!p.saved ? <div className="save-form"><label>職人名<input maxLength={12} value={p.name} onChange={(e) => p.setName(e.target.value)} /></label><button onClick={p.save}>ランキングに保存</button></div> : <p>ランキングに保存しました！</p>}<button className="start-button" onClick={p.retry}>もう一度</button><button className="secondary" onClick={() => void safeShare({ title: 'SUSHI RUSH', text: `SUSHI RUSHで${p.snapshot.score}点！` })}>結果を共有</button><button className="secondary" onClick={p.title}>タイトルへ</button></section>;
+  return <section className="panel-screen result"><h1>おつかれさま！</h1><div className="rank">{rank}</div><p>スコア<strong>{p.snapshot.score.toLocaleString()}</strong></p><div className="result-stats"><span>最高コンボ <b>×{p.snapshot.maxCombo}</b></span><span>提供した注文 <b>{p.snapshot.served}</b></span></div>{!p.saved ? <div className="save-form"><label>職人名<input maxLength={12} value={p.name} onChange={(e) => p.setName(e.target.value)} /></label><PressButton onPress={p.save}>ランキングに保存</PressButton></div> : <p>ランキングに保存しました！</p>}<PressButton className="start-button" onPress={p.retry}>もう一度</PressButton><PressButton className="secondary" onPress={() => void safeShare({ title: 'SUSHI RUSH', text: `SUSHI RUSHで${p.snapshot.score}点！` })}>結果を共有</PressButton><PressButton className="secondary" onPress={p.title}>タイトルへ</PressButton></section>;
 }

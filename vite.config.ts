@@ -5,7 +5,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 export default defineConfig({
   base: './',
   plugins: [react(), VitePWA({
-    registerType: 'prompt',
+    registerType: 'autoUpdate',
     injectRegister: 'auto',
     manifest: false,
     workbox: {

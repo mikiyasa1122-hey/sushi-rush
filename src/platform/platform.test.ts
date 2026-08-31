@@ -26,10 +26,22 @@ describe('safe capabilities', () => {
 });
 
 describe('AudioController', () => {
-  it('respects independent voice and effect settings', () => {
+  const createContextDouble = (overrides: Partial<AudioContext> = {}) => {
     const oscillator = { type: 'sine', frequency: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {}, start() {}, stop() {} };
     const gain = { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} };
-    const context = { currentTime: 0, destination: {}, resume: () => Promise.resolve(), createOscillator: () => oscillator, createGain: () => gain } as unknown as AudioContext;
+    return {
+      state: 'running',
+      currentTime: 0,
+      destination: {},
+      resume: () => Promise.resolve(),
+      createOscillator: () => oscillator,
+      createGain: () => gain,
+      ...overrides,
+    } as unknown as AudioContext;
+  };
+
+  it('respects independent voice and effect settings', () => {
+    const context = createContextDouble();
     const audio = new AudioController(() => ({ play: () => Promise.resolve() } as HTMLAudioElement), () => undefined, () => context);
     audio.setVoiceEnabled(false);
     expect(audio.playVoice()).toBe(false);
@@ -48,5 +60,78 @@ describe('AudioController', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(spoken).toEqual(['Hey Omachi!']);
+  });
+
+  it('does not finish unlocking or play effects until a suspended iOS context resumes', async () => {
+    let state: AudioContextState = 'suspended';
+    let finishResume = () => undefined;
+    const context = createContextDouble({
+      resume: vi.fn(() => new Promise<void>((resolve) => {
+        finishResume = () => { state = 'running'; resolve(); };
+      })),
+    });
+    Object.defineProperty(context, 'state', { get: () => state });
+    const audio = new AudioController(undefined, undefined, () => context);
+    let unlocked: boolean | undefined;
+
+    const pending = Promise.resolve(audio.unlock()).then((value) => { unlocked = value; });
+
+    expect(context.resume).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(unlocked).toBeUndefined();
+    expect(audio.playEffect('correct')).toBe(false);
+
+    finishResume();
+    await pending;
+    expect(unlocked).toBe(true);
+    expect(audio.playEffect('correct')).toBe(true);
+  });
+
+  it('returns false instead of throwing when iOS rejects audio resume', async () => {
+    const context = createContextDouble({
+      state: 'suspended',
+      resume: () => Promise.reject(new Error('not allowed')),
+    });
+    const audio = new AudioController(undefined, undefined, () => context);
+
+    await expect(Promise.resolve(audio.unlock())).resolves.toBe(false);
+  });
+
+  it('requests Hey Omachi speech in the current user gesture', () => {
+    const events: string[] = [];
+    const audio = new AudioController(
+      () => ({ play: () => { events.push('asset'); return Promise.reject(new Error('missing')); } } as HTMLAudioElement),
+      (text) => events.push(text),
+      () => createContextDouble(),
+    );
+
+    expect(audio.playVoice()).toBe(true);
+    expect(events).toEqual(['Hey Omachi!']);
+  });
+
+  it('retries an effect after iOS suspends and resumes the audio context', async () => {
+    let state: AudioContextState = 'suspended';
+    let finishResume = () => undefined;
+    const start = vi.fn();
+    const context = createContextDouble({
+      resume: vi.fn(() => new Promise<void>((resolve) => {
+        finishResume = () => { state = 'running'; resolve(); };
+      })),
+      createOscillator: () => ({
+        type: 'sine',
+        frequency: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+        connect() {}, start, stop() {},
+      } as unknown as OscillatorNode),
+    });
+    Object.defineProperty(context, 'state', { get: () => state });
+    const audio = new AudioController(undefined, undefined, () => context);
+
+    const pending = audio.playEffectAfterUnlock('correct');
+    expect(context.resume).toHaveBeenCalledOnce();
+    expect(start).not.toHaveBeenCalled();
+
+    finishResume();
+    await expect(pending).resolves.toBe(true);
+    expect(start).toHaveBeenCalledOnce();
   });
 });
